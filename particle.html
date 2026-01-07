@@ -1,325 +1,414 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Gesture-Controlled 3D Particle System (Three.js)</title>
-    <style>
-        /* Basic styling for full screen */
-        body { margin: 0; overflow: hidden; background-color: #000000; }
-        canvas { display: block; }
+<meta charset="UTF-8">
+<title>Two-Hand Particle Control</title>
 
-        /* Container for the hidden webcam feed and overlay */
-        #webcam-container {
-            position: absolute;
-            top: 0;
-            left: 0;
-            z-index: 10;
-            /* Set opacity low to keep it out of the way, but visible for debugging */
-            opacity: 0.1;
-        }
+<style>
+html, body {
+    margin: 0;
+    padding: 0;
+    overflow: hidden;
+    background: black;
+}
 
-        /* The canvas where MediaPipe draws the landmarks (for debugging) */
-        #output-canvas {
-            transform: scaleX(-1); /* Flip the canvas horizontally for a mirrored view */
-        }
-    </style>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r131/three.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675464670/hands.js"></script>
+#webcam {
+    position: absolute;
+    width: 100vw;
+    height: 100vh;
+    object-fit: cover;
+    transform: scaleX(-1);
+    opacity: 0.18;
+    filter: brightness(1.25) contrast(1.15);
+    z-index: 1;
+}
+
+canvas {
+    position: absolute;
+    inset: 0;
+    z-index: 2;
+    transform: scaleX(-1);
+}
+</style>
 </head>
+
 <body>
-    <div id="webcam-container">
-        <video id="webcam" style="display: none;" autoplay></video>
-        <canvas id="output-canvas"></canvas>
-    </div>
 
-    <script>
-        // --- 1. GLOBAL VARIABLES ---
-        let scene, camera, renderer, particles;
-        let clock = new THREE.Clock();
-        let handTemplate = 0; // 0: Heart/Flower, 1: Firework/Explosion
-        let lastGestureTime = 0;
-        const GESTURE_DEBOUNCE_TIME = 0.5; // seconds
-        const PARTICLE_COUNT = 50000;
-        const DURATION = 3.0; // Life duration of a particle in seconds
+<video id="webcam" autoplay playsinline muted></video>
 
-        // --- 2. THREE.JS SETUP ---
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4/hands.js"></script>
 
-        function initThree() {
-            scene = new THREE.Scene();
-            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
-            camera.position.z = 50;
+<script>
+/* ================= CAMERA ================= */
+const video = document.getElementById("webcam");
+navigator.mediaDevices.getUserMedia({ video: true })
+.then(s => video.srcObject = s);
 
-            renderer = new THREE.WebGLRenderer({ antialias: true });
-            renderer.setSize(window.innerWidth, window.innerHeight);
-            document.body.appendChild(renderer.domElement);
-            
-            createParticles();
+/* ================= THREE ================= */
+const scene = new THREE.Scene();
 
-            window.addEventListener('resize', onWindowResize, false);
+const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.1, 1000);
+camera.position.z = 55;
+
+const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+
+const COUNT = 20000;
+
+/* SHAPES */
+const cloud = new Float32Array(COUNT * 3);
+const sphere = new Float32Array(COUNT * 3);
+const spiral = new Float32Array(COUNT * 3);
+const pos = new Float32Array(COUNT * 3);
+const burstDir = new Float32Array(COUNT * 3);
+
+for (let i = 0; i < COUNT; i++) {
+    const x = Math.random() - 0.5;
+    const y = Math.random() - 0.5;
+    const z = Math.random() - 0.5;
+    const l = Math.hypot(x, y, z) + 0.0001;
+
+    burstDir[i*3]   = x / l;
+    burstDir[i*3+1] = y / l;
+    burstDir[i*3+2] = z / l;
+}
+
+/* COMPACT CLOUD */
+for (let i = 0; i < COUNT; i++) {
+    cloud[i*3]   = (Math.random() - 0.5) * 5;
+    cloud[i*3+1] = (Math.random() - 0.5) * 5;
+    cloud[i*3+2] = (Math.random() - 0.5) * 5;
+}
+
+/* HOLLOW SPHERE */
+for (let i = 0; i < COUNT; i++) {
+    const u = Math.random();
+    const v = Math.random();
+
+    const theta = u * Math.PI * 2;
+    const phi = Math.acos(2 * v - 1);
+
+    const r = 14 + Math.random() * 2.5;
+
+    sphere[i*3]   = r * Math.sin(phi) * Math.cos(theta);
+    sphere[i*3+1] = r * Math.sin(phi) * Math.sin(theta);
+    sphere[i*3+2] = r * Math.cos(phi);
+}
+
+/* SPIRAL */
+for (let i = 0; i < COUNT; i++) {
+    const t = i / COUNT;
+    const angle = t * Math.PI * 18;
+    const radius = 0.5 + t * 12;
+    const y = (t - 0.5) * 18;
+
+    spiral[i*3]   = Math.cos(angle) * radius;
+    spiral[i*3+1] = y;
+    spiral[i*3+2] = Math.sin(angle) * radius;
+}
+
+pos.set(cloud);
+
+const geometry = new THREE.BufferGeometry();
+geometry.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+
+const material = new THREE.ShaderMaterial({
+    transparent: true,
+    depthWrite: false,
+    uniforms: {
+        uSize: { value: 0.25 },
+        uInnerColor: { value: new THREE.Color(0xff66cc) },
+        uOuterColor: { value: new THREE.Color(0x66ccff) },
+        uSphereScale: { value: 1.0 },
+        uMorph: { value: 0.0 }
+    },
+    vertexShader: `
+        uniform float uSize;
+        uniform float uSphereScale;
+        varying float vDist;
+
+        void main() {
+            vDist = length(position) / (14.0 * uSphereScale);
+
+            vec4 mv = modelViewMatrix * vec4(position, 1.0);
+            gl_PointSize = uSize * (300.0 / -mv.z);
+            gl_Position = projectionMatrix * mv;
         }
+    `,
+    fragmentShader: `
+        uniform vec3 uInnerColor;
+        uniform vec3 uOuterColor;
+        uniform float uMorph;
+        varying float vDist;
 
-        function onWindowResize() {
-            camera.aspect = window.innerWidth / window.innerHeight;
-            camera.updateProjectionMatrix();
-            renderer.setSize(window.innerWidth, window.innerHeight);
+        void main() {
+            if (length(gl_PointCoord - 0.5) > 0.5) discard;
+
+            float g = smoothstep(0.2, 1.0, vDist);
+            vec3 color = mix(uInnerColor, uOuterColor, g * uMorph);
+
+            gl_FragColor = vec4(color, 0.75);
         }
-
-        function createParticles() {
-            const geometry = new THREE.BufferGeometry();
-            const positions = new Float32Array(PARTICLE_COUNT * 3);
-            const customAttributes = new Float32Array(PARTICLE_COUNT * 3); // StartTime, TemplateID, InitialSize
-
-            for (let i = 0; i < PARTICLE_COUNT; i++) {
-                // Initial random position (center of the system)
-                positions[i * 3 + 0] = (Math.random() - 0.5) * 10;
-                positions[i * 3 + 1] = (Math.random() - 0.5) * 10;
-                positions[i * 3 + 2] = (Math.random() - 0.5) * 10;
-                
-                // Custom attributes for shader
-                customAttributes[i * 3 + 0] = Math.random() * DURATION; // Start Time (offset for continuous cycling)
-                customAttributes[i * 3 + 1] = Math.floor(Math.random() * 2); // Initial Template ID (0 or 1)
-                customAttributes[i * 3 + 2] = Math.random() * 0.5 + 0.5; // Initial Size Scale
-            }
-
-            geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-            // aStartTime will be used for time offset
-            geometry.setAttribute('aStartTime', new THREE.BufferAttribute(customAttributes, 1).setUsage(THREE.StaticDrawUsage)); 
-            // aTemplateID will be used for initial template
-            geometry.setAttribute('aTemplateID', new THREE.BufferAttribute(customAttributes.slice(PARTICLE_COUNT, PARTICLE_COUNT * 2), 1).setUsage(THREE.StaticDrawUsage)); 
-
-            const material = new THREE.ShaderMaterial({
-                uniforms: {
-                    time: { value: 0.0 },
-                    // Hand Position in 3D space, controlling expansion center
-                    handPos: { value: new THREE.Vector3(0, 0, 0) }, 
-                    // Global Template Control (0 or 1, switched by gesture)
-                    particleTemplate: { value: 0.0 }, 
-                    // Color Control based on Hand Y position (vertical)
-                    colorControl: { value: 0.5 }, 
-                    pointSize: { value: 5.0 }
-                },
-                vertexShader: `
-                    attribute float aStartTime;
-                    attribute float aTemplateID;
-                    
-                    uniform float time;
-                    uniform vec3 handPos;
-                    uniform float particleTemplate;
-                    uniform float pointSize;
-
-                    void main() {
-                        // Particle Lifetime (0 to DURATION) and Normalized Time (0 to 1)
-                        float lifeTime = mod(time + aStartTime, ${DURATION}.0);
-                        float normalizedTime = lifeTime / ${DURATION}.0; 
-
-                        vec3 newPosition = position;
-                        
-                        // --- GESTURE CONTROLLED BEHAVIOR ---
-                        
-                        // Calculate expansion factor based on Hand Z (depth). Nearer hand = more expansion.
-                        // Clamp the Z depth for a sensible range (e.g., 0 to 50 units away)
-                        float clampedZ = clamp(handPos.z, 0.0, 50.0);
-                        // The closer the hand (lower Z), the higher the factor (closer to 1.0)
-                        float expansionFactor = 1.0 - (clampedZ / 50.0); 
-                        expansionFactor = pow(expansionFactor, 2.0); // Make it more sensitive when close
-
-                        // Determine the current template for this particle
-                        float currentTemplate = particleTemplate; // The global uniform controls the switch
-
-                        if (currentTemplate < 0.5) { // Template 0: Heart/Flower (Gentle, centralized)
-                            // Movement towards the hand position
-                            vec3 direction = normalize(newPosition - handPos);
-                            newPosition += direction * normalizedTime * expansionFactor * 20.0;
-                            // Add gentle lift
-                            newPosition.y += sin(time * 0.5 + newPosition.x * 0.1) * 2.0;
-                        } else { // Template 1: Firework/Explosion (Fast, outward, controlled by hand)
-                            // Explosive movement originating from handPos
-                            vec3 direction = normalize(newPosition - handPos);
-                            newPosition = handPos + direction * normalizedTime * 70.0 * (0.5 + expansionFactor * 0.5);
-                        }
-                        
-                        // Calculate final screen position
-                        vec4 mvPosition = modelViewMatrix * vec4(newPosition, 1.0);
-                        
-                        // Point size diminishes over the particle's life (1.0 to 0.0)
-                        gl_PointSize = pointSize * (1.0 - normalizedTime) * (300.0 / -mvPosition.z);
-                        gl_Position = projectionMatrix * mvPosition;
-                    }
-                `,
-                fragmentShader: `
-                    uniform float time;
-                    uniform float colorControl;
-                    uniform float particleTemplate;
-                    
-                    void main() {
-                        // Create a circular shape for the particle
-                        if (length(gl_PointCoord - vec2(0.5)) > 0.5) discard;
-                        
-                        vec3 finalColor;
-                        
-                        if (particleTemplate < 0.5) { // Template 0: Heart/Flower (Pink/Red hues)
-                            float r = 0.8 + 0.2 * sin(time * 3.0);
-                            // Color changes based on the vertical hand position (colorControl)
-                            finalColor = mix(vec3(1.0, 0.2, 0.5), vec3(0.5, 0.0, 1.0), colorControl); 
-                        } else { // Template 1: Firework/Explosion (Bright, dynamic spectrum)
-                            // A dynamic color shift based on time
-                            float hue = mod(time * 0.1, 1.0);
-                            // Convert HSL to RGB (simple approximation)
-                            float r = abs(hue * 6.0 - 3.0) - 1.0;
-                            float g = 2.0 - abs(hue * 6.0 - 2.0);
-                            float b = 2.0 - abs(hue * 6.0 - 4.0);
-                            finalColor = clamp(vec3(r, g, b), 0.0, 1.0) * (1.0 + colorControl);
-                        }
-                        
-                        // Add fading (alpha) based on age
-                        float alpha = 1.0 - gl_FragCoord.z;
-                        gl_FragColor = vec4(finalColor, alpha);
-                    }
-                `,
-                transparent: true,
-                depthWrite: false
-            });
-
-            particles = new THREE.Points(geometry, material);
-            scene.add(particles);
-        }
-
-        function animate() {
-            requestAnimationFrame(animate);
-            const delta = clock.getDelta();
-            
-            // Update the shader time uniform
-            if (particles) {
-                particles.material.uniforms.time.value += delta;
-            }
-
-            renderer.render(scene, camera);
-        }
-        
-        // --- 3. MEDIAPIPE HAND TRACKING ---
-        
-        const videoElement = document.getElementById('webcam');
-        const canvasElement = document.getElementById('output-canvas');
-        const canvasCtx = canvasElement.getContext('2d');
-        
-        async function setupWebcam() {
-            if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-                console.error("Webcam access not supported by this browser.");
-                return;
-            }
-            try {
-                const stream = await navigator.mediaDevices.getUserMedia({ video: true });
-                videoElement.srcObject = stream;
-            } catch (error) {
-                console.error("Error accessing webcam: ", error);
-            }
-        
-            return new Promise((resolve) => {
-                videoElement.onloadedmetadata = () => {
-                    canvasElement.width = videoElement.videoWidth;
-                    canvasElement.height = videoElement.videoHeight;
-                    videoElement.play();
-                    resolve();
-                };
-            });
-        }
-        
-        function mapHandToControls(results) {
-            const uniforms = particles.material.uniforms;
-            const currentTime = clock.getElapsedTime();
-            
-            if (results.multiHandLandmarks.length > 0) {
-                const landmarks = results.multiHandLandmarks[0];
-                
-                // Use the Index Finger Tip (landmark 8) for 3D control
-                const indexFingerTip = landmarks[8];
-                
-                // --- A. Position Mapping ---
-                
-                // Map X (0 to 1) to Three.js X (-25 to 25)
-                const mappedX = (indexFingerTip.x - 0.5) * -50; 
-                // Map Y (0 to 1) to Three.js Y (-25 to 25)
-                const mappedY = (indexFingerTip.y - 0.5) * 50;  
-                // Map Z (depth) from ~0 to ~1 to Three.js Z (0 to -50)
-                // Note: Index Finger tip Z is usually negative/small for close objects
-                const mappedZ = -indexFingerTip.z * 50; 
-
-                // Update Hand Position (controls expansion center and Z-factor)
-                uniforms.handPos.value.set(mappedX, mappedY, mappedZ);
-                
-                // Update Color Control (based on vertical hand position)
-                // colorControl should be 0 (bottom) to 1 (top)
-                uniforms.colorControl.value = 1.0 - indexFingerTip.y;
+    `
+});
 
 
-                // --- B. Gesture Recognition (Template Switching) ---
-                
-                // Simple Clenched Fist Detection (Check distance between Thumb Tip (4) and Pinky Base (17))
-                const thumbTip = landmarks[4];
-                const pinkyBase = landmarks[17];
-                const distanceThreshold = 0.05; // Normalized distance (0 to 1)
+const particles = new THREE.Points(geometry, material);
+scene.add(particles);
 
-                const distance = Math.sqrt(
-                    Math.pow(thumbTip.x - pinkyBase.x, 2) + 
-                    Math.pow(thumbTip.y - pinkyBase.y, 2)
-                );
-                
-                if (distance < distanceThreshold && (currentTime - lastGestureTime) > GESTURE_DEBOUNCE_TIME) {
-                    // Trigger Template Switch
-                    handTemplate = (handTemplate === 0) ? 1 : 0;
-                    uniforms.particleTemplate.value = handTemplate;
-                    lastGestureTime = currentTime; // Update debounce timer
-                    
-                    console.log(`Template switched to: ${handTemplate === 0 ? 'Heart/Flower' : 'Firework/Explosion'}`);
-                }
+/* ================= STATE ================= */
+let morph = 0;
+let morphTarget = 0;
+let sphereScale = 1;
+let sphereScaleTarget = 1;
+let hueSmooth = 0.75;
+let spiralMix = 0;
+let spiralTarget = 0;
+let spiralTight = 1;
+let spiralTightTarget = 1;
+let burst = 0;
+let burstTarget = 0;
 
-                // --- C. Debug Drawing (MediaPipe) ---
-                drawConnectors(canvasCtx, landmarks, HAND_CONNECTIONS, {color: '#00FF00', lineWidth: 5});
-                drawLandmarks(canvasCtx, landmarks, {color: '#FF0000', lineWidth: 2});
+/* ================= ANIMATE ================= */
+function animate() {
+    requestAnimationFrame(animate);
 
-            } else {
-                // Clear the canvas if no hand is detected
-                canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
-            }
-        }
-        
-        // MediaPipe Initialization
-        const hands = new Hands({locateFile: (file) => {
-            return `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4/${file}`;
-        }});
-        
-        hands.setOptions({
-            maxNumHands: 1,
-            modelComplexity: 1,
-            minDetectionConfidence: 0.7,
-            minTrackingConfidence: 0.7
-        });
-        
-        hands.onResults(mapHandToControls);
-        
-        // --- 4. MAIN EXECUTION LOOP ---
-        
-        async function startMediaPipeLoop() {
-            if (videoElement.readyState < 2) {
-                // Wait for video to load fully
-                await new Promise(resolve => videoElement.onloadeddata = resolve);
-            }
+    morph += (morphTarget - morph) * 0.08;
+    sphereScale += (sphereScaleTarget - sphereScale) * 0.06;
+    spiralMix += (spiralTarget - spiralMix) * 0.08;
+    spiralTight += (spiralTightTarget - spiralTight) * 0.08;
+    burst += (burstTarget - burst) * 0.08;
 
-            // Main loop to send frames to MediaPipe
-            await hands.send({image: videoElement});
-            requestAnimationFrame(startMediaPipeLoop);
-        }
+    for (let i = 0; i < COUNT; i++) {
+        const cx = cloud[i*3];
+	const cy = cloud[i*3+1];
+	const cz = cloud[i*3+2];
 
-        // Start the application
-        async function startApp() {
-            initThree(); // Initialize Three.js scene
-            animate();   // Start the Three.js rendering loop
-            await setupWebcam(); // Get webcam access
-            startMediaPipeLoop(); // Start the MediaPipe processing loop
-        }
+	const sx = sphere[i*3] * sphereScale;
+	const sy = sphere[i*3+1] * sphereScale;
+	const sz = sphere[i*3+2] * sphereScale;
 
-        startApp();
-    </script>
+	const px = spiral[i*3] * spiralTight;
+	const py = spiral[i*3+1];
+	const pz = spiral[i*3+2] * spiralTight;
+
+	const mix1x = THREE.MathUtils.lerp(cx, sx, morph);
+	const mix1y = THREE.MathUtils.lerp(cy, sy, morph);
+	const mix1z = THREE.MathUtils.lerp(cz, sz, morph);
+
+	pos[i*3]   = THREE.MathUtils.lerp(mix1x, px, spiralMix);
+	pos[i*3+1] = THREE.MathUtils.lerp(mix1y, py, spiralMix);
+	pos[i*3+2] = THREE.MathUtils.lerp(mix1z, pz, spiralMix);
+
+	pos[i*3]   += burstDir[i*3]   * burst * 35;
+	pos[i*3+1] += burstDir[i*3+1] * burst * 35;
+	pos[i*3+2] += burstDir[i*3+2] * burst * 35;
+
+    }
+
+    geometry.attributes.position.needsUpdate = true;
+
+    if (morph > 0.6) {
+        particles.rotation.y += 0.002;
+        particles.rotation.x += 0.001;
+    }
+
+    if (spiralMix > 0.6) {
+    particles.rotation.y += 0.09;
+    }
+
+    material.uniforms.uSphereScale.value = sphereScale;
+    material.uniforms.uMorph.value = morph;
+
+
+    renderer.render(scene, camera);
+}
+animate();
+
+/* ================= MEDIAPIPE ================= */
+const hands = new Hands({
+    locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4/${f}`
+});
+
+hands.setOptions({
+    maxNumHands: 2,
+    modelComplexity: 1,
+    minDetectionConfidence: 0.7,
+    minTrackingConfidence: 0.7
+});
+
+hands.onResults(res => {
+    if (!res.multiHandLandmarks?.length) return;
+
+    const h1 = res.multiHandLandmarks[0];
+    const tip1 = h1[8];
+
+    let centerX = tip1.x;
+    let centerY = tip1.y;
+
+    if (res.multiHandLandmarks.length > 1) {
+        const tip2 = res.multiHandLandmarks[1][8];
+
+        centerX = (tip1.x + tip2.x) * 0.5;
+        centerY = (tip1.y + tip2.y) * 0.5;
+    }
+
+    particles.position.set(
+        (centerX - 0.5) * 130,
+        (0.5 - centerY) * 70,
+        0
+    );
+
+
+    /* HAND STATE LOGIC (0 / 1 / 2 HANDS OPEN) */
+    let openHands = 0;
+
+    res.multiHandLandmarks.forEach(hand => {
+        const thumb = hand[4];
+        const pinky = hand[20];
+
+        const openness = Math.hypot(
+            thumb.x - pinky.x,
+            thumb.y - pinky.y
+        );
+
+        if (openness > 0.25) openHands++;
+    });
+
+    /* SHAPE CONTROL */
+    if (openHands === 1) {
+        spiralTarget = 1;   // ONE HAND → SPIRAL
+        morphTarget = 0;
+    }
+    else if (openHands === 2) {
+        spiralTarget = 0;
+        morphTarget = 1;   // TWO HANDS → SPHERE
+    }
+    else {
+        spiralTarget = 0;
+        morphTarget = 0;   // CLOSED → CLOUD
+    }
+
+    if (openHands === 1) {
+    const hand = res.multiHandLandmarks.find(h => {
+        const t = h[4], p = h[20];
+        return Math.hypot(t.x - p.x, t.y - p.y) > 0.25;
+    });
+
+    if (hand) {
+        const thumb = hand[4];
+        const index = hand[8];
+
+        const pinch = Math.hypot(
+            thumb.x - index.x,
+            thumb.y - index.y
+        );
+
+        spiralTightTarget = THREE.MathUtils.clamp(
+            pinch * 8,
+            0.35,
+            1.6
+        );
+    }
+} else {
+    spiralTightTarget = 1;
+}
+
+
+
+/* SPHERE SIZE ONLY WHEN 2 HANDS */
+if (res.multiHandLandmarks.length === 2) {
+    const t1 = res.multiHandLandmarks[0][8];
+    const t2 = res.multiHandLandmarks[1][8];
+
+    const d = Math.hypot(
+        t1.x - t2.x,
+        t1.y - t2.y
+    );
+
+    sphereScaleTarget = THREE.MathUtils.clamp(d * 5.5, 0.2, 3.0);
+}
+
+
+let okHands = 0;
+
+res.multiHandLandmarks.forEach(hand => {
+    const thumb = hand[4];
+    const index = hand[8];
+    const pinky = hand[20];
+
+    const pinch = Math.hypot(
+        thumb.x - index.x,
+        thumb.y - index.y
+    );
+
+    const spread = Math.hypot(
+        index.x - pinky.x,
+        index.y - pinky.y
+    );
+
+    if (pinch < 0.05 && spread > 0.15) {
+        okHands++;
+    }
+});
+
+if (okHands === 2) {
+    burstTarget = 1;
+}
+
+
+if (res.multiHandLandmarks.length === 2) {
+    const h1 = res.multiHandLandmarks[0][8];
+    const h2 = res.multiHandLandmarks[1][8];
+
+    const dx = Math.abs(h1.x - h2.x);
+    const dy = Math.abs(h1.y - h2.y);
+
+    // Hands cross horizontally
+    if (dx < 0.04 && dy < 0.12) {
+        burstTarget = 0;
+    }
+}
+
+
+    /* SLOW COLOR */
+    const hueTarget = THREE.MathUtils.clamp(
+        0.9 - tip1.y * 0.6,
+        0.20,
+        1.40
+    );
+
+    hueSmooth += (hueTarget - hueSmooth) * 0.06;
+    
+const outerHue = THREE.MathUtils.clamp(
+    -0.2 + sphereScale * 0.5,
+    0.0,
+    0.66
+);
+
+material.uniforms.uInnerColor.value.setHSL(hueSmooth, 1, 0.6);
+material.uniforms.uOuterColor.value.setHSL(outerHue, 1, 0.6);
+
+});
+
+/* ================= LOOP ================= */
+async function loop() {
+    if (video.readyState === 4) {
+        await hands.send({ image: video });
+    }
+    requestAnimationFrame(loop);
+}
+video.addEventListener("playing", loop);
+
+/* ================= RESIZE ================= */
+addEventListener("resize", () => {
+    camera.aspect = innerWidth / innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(innerWidth, innerHeight);
+});
+</script>
+
 </body>
 </html>
