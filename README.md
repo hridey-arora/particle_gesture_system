@@ -1,5 +1,11 @@
 # ✨ Two-Hand Particle Gesture System
 
+## 📌 Project Status
+**Status:** Demo-ready browser prototype.  
+This repository contains a single-file interactive web demo that runs in a modern browser with webcam permission and an internet connection for CDN assets.
+
+---
+
 A browser-based interactive particle visualizer controlled with hand gestures through the webcam.
 
 The project uses **Three.js** for the particle scene and **MediaPipe Hands** for real-time hand tracking. Everything runs from a single HTML file.
